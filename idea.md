@@ -117,9 +117,10 @@ Articles scoring >= `RESEARCH_THRESHOLD` (default 7/10) or flagged `is_major` ge
 **Research pipeline:** `fetch → analyze → deep_research → ingest`
 
 **Search backend priority:**
-1. **Tavily** — best quality, built for AI agents, free tier 1000 searches/month (`TAVILY_API_KEY`)
-2. **Perplexica** — self-hosted on Minisforum in Docker, Academic mode searches arXiv + Semantic Scholar (`PERPLEXICA_URL=http://100.118.247.106:3000`)
-3. **DuckDuckGo** — always-on fallback, no key needed
+1. **Perplexica** — self-hosted on Minisforum in Docker, Academic mode searches arXiv + Semantic Scholar (`PERPLEXICA_URL=http://100.118.247.106:3000`). Unlimited, no API key.
+2. **DuckDuckGo** — always-on fallback, no key, no limits
+
+*(Tavily was removed — 1000 searches/month free tier is too low at ~1,200 searches/month at default config)*
 
 **What the research agent does per article:**
 1. Ollama generates 2 focused search queries (related papers + reactions/implications)
