@@ -20,19 +20,22 @@ sources.json  ←──── Claude (weekly curation)
  analyze_node     Ollama: summarize + relevance score + tags (per article, parallel)
      │
      ▼
- select_node      Pick top N by score, deduplicate, filter already-published
+ editor_node      Autonomous editor agent — picks articles, writes reasoning + TL;DR
+     │               per article, drafts editorial note on the issue's theme
+     ▼
+ write_node       Assemble Jekyll post with editor commentary baked in
      │
      ▼
- write_node       Ollama: group by type, write intro, assemble Jekyll post
+ publish_node     Git commit + push → GitHub Pages + ingest to Qdrant
      │
      ▼
- publish_node     Git commit + push → GitHub Pages auto-builds
+ Qdrant Cloud     Growing knowledge base — semantic search + RAG chatbot on top
 ```
 
 ## Design Choices
 
 **Local model for analysis, Claude for curation.**
-Running Ollama locally means analyzing 50–100 articles per day costs nothing. Claude is reserved for the one task that benefits most from its broader knowledge: deciding which sources are worth following and which have gone stale.
+Running Ollama remotely on the Minisforum (via Tailscale) means analyzing 50–100 articles per day costs nothing. Claude is reserved for the one task that benefits most from its broader knowledge: deciding which sources are worth following and which have gone stale.
 
 **sources.json as the single source of truth.**
 All source management happens in one JSON file. Adding a new blog, removing a dead feed, or bumping a source's tier is a one-line edit — and Claude does it automatically every week.
@@ -42,6 +45,70 @@ Same pattern as the ai-history-blog-generator. Each stage is an explicit node wi
 
 **Runs as a Windows service.**
 `python service.py` runs a daily scheduled job via the `schedule` library. For always-on use, configure Windows Task Scheduler to call `python service.py --once` at 07:00.
+
+## Infrastructure
+
+```
+Mac  ──Tailscale──►  Minisforum (100.118.247.106)
+  │                      └── Ollama: qwen2.5:14b + nomic-embed-text
+  │
+  └─────────────────►  Qdrant Cloud (free tier)
+                            └── collection: ai_articles (768-dim vectors)
+
+Blog: ai-newsletter.aag1091.com (GitHub Pages, whats-new-in-ai repo)
+Generator: github.com/aag1091-alt/ai-newsletter
+```
+
+## The Editor Agent *(planned)*
+
+The current `select_node` is dumb — it just sorts by relevance score and cuts at top-N. The editor agent replaces it with an LLM that has a personality and genuine editorial judgment.
+
+**What the editor does:**
+- Reviews all analyzed articles like an editor reviewing pitches
+- Picks what goes in and what gets cut — with explicit reasoning for each decision
+- Writes a TL;DR at the end of every selected article
+- Drafts a short editorial note at the top of each issue explaining the week's theme and what was left out and why
+- Tracks recent issues to avoid covering the same topic two days in a row
+
+**What an article looks like with the editor:**
+```markdown
+### Claude 4 Safety Evaluations — New Benchmark Suite
+*Anthropic Blog · May 9 · ★ Major*
+
+Anthropic released a new evaluation framework for measuring deceptive
+alignment in frontier models, open-sourced with three findings that
+challenge current RLHF assumptions...
+
+**Why this made the cut:** First serious attempt to operationalize
+deceptive alignment as a measurable property. The methodology is
+portable to open-source models — this will matter beyond Anthropic.
+
+**TL;DR:** New open-source eval suite for deceptive alignment.
+3 findings challenge RLHF. Reproducible on open models.
+```
+
+**Editor's personality (system prompt):**
+- Skeptical of hype, prefers papers with real benchmarks
+- Biased toward open-source impact
+- Avoids covering the same topic two issues in a row
+- Calls out when something is marketing vs. genuine research
+
+**New files needed:** `generate/editor.py`, updated `schemas.py` (`EditorDecision`, `ArticleVerdict`), updated `graph.py` and `writer.py`.
+
+## Deep Research Layer *(planned)*
+
+Add **Perplexica** (open source Perplexity alternative) running in Docker on the Minisforum, connected to the existing Ollama setup. Has an Academic focus mode for arXiv + Semantic Scholar. Paired with **SearXNG** (self-hosted, no API key) or **Tavily** (1000 free searches/month) as the search backend.
+
+The pipeline can call this when it wants to go deeper on a topic — e.g., if a paper gets a high relevance score, the editor agent can request a deeper search before deciding whether to include it.
+
+## Knowledge Base & Chatbot
+
+The Qdrant collection grows with every newsletter run. On top of it:
+
+- `search.py` — CLI semantic search with filters (source, date range, tags, major-only)
+- `chatbot.py` — RAG chatbot: question → embed → Qdrant top-k → Ollama answers with citations
+
+**Planned:** Web UI for the chatbot (FastAPI + simple frontend), hybrid search (sparse + dense vectors).
 
 ## Sources
 
@@ -56,8 +123,9 @@ Live at [ai-newsletter.aag1091.com](https://ai-newsletter.aag1091.com)
 Blog repo: [aag1091-alt/whats-new-in-ai](https://github.com/aag1091-alt/whats-new-in-ai)
 
 Each issue groups content into:
-- **Research Highlights** — arXiv papers with summaries
-- **Industry News** — company blog posts and announcements
+- **Editorial Note** — editor's take on the week's theme *(with editor agent)*
+- **Research Highlights** — arXiv papers with summaries + TL;DR
+- **Industry News** — company blog posts and announcements + TL;DR
 - **From the Community** — notable tweets and discussions
 - **Quick Reads** — remaining items as one-liners
 
@@ -68,6 +136,8 @@ cp .env.example .env        # fill in API keys
 pip install -r requirements.txt
 python -m generate          # run once
 python service.py           # run as daily service
+python search.py "query"    # search the knowledge base
+python chatbot.py           # chat with the knowledge base
 ```
 
 Set `NEWSLETTER_BLOG_DIR` in `.env` to the path of your local clone of the blog repo.
