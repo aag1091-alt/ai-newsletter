@@ -2,12 +2,14 @@
 """
 AI Newsletter Generator
 =======================
-Fetches, analyzes, and publishes a daily AI newsletter to a Jekyll blog.
+Two independent pipelines — run together or separately.
 
 Usage:
-  python -m generate              # run once now
+  python -m generate              # research + newsletter (full run)
+  python -m generate --research   # fetch → analyze → ingest to Qdrant only
+  python -m generate --newsletter # qdrant_fetch → select → write → publish only
   python -m generate --status     # show current state
-  python -m generate --curate     # only refresh sources (runs Claude curator)
+  python -m generate --curate     # force source refresh with Claude
   python -m generate --service    # run as a scheduled daemon
 """
 
@@ -88,6 +90,16 @@ def main() -> None:
         help="Force a source curation run (uses Claude CLI) and exit",
     )
     parser.add_argument(
+        "--research",
+        action="store_true",
+        help="Research only: fetch → analyze → ingest to Qdrant",
+    )
+    parser.add_argument(
+        "--newsletter",
+        action="store_true",
+        help="Newsletter only: qdrant_fetch → select → write → publish",
+    )
+    parser.add_argument(
         "--service",
         action="store_true",
         help="Run as a scheduled daemon (daily at SCHEDULE_TIME)",
@@ -117,14 +129,22 @@ def main() -> None:
             service_mod.run_service()
         return
 
-    # Default: run pipeline once
+    if args.research:
+        from .graph import run_research
+        run_research()
+        return
+
+    if args.newsletter:
+        from .graph import run_newsletter
+        post_path = run_newsletter()
+        if not post_path:
+            print("Newsletter pipeline completed but no post was written.")
+            sys.exit(1)
+        return
+
+    # Default: both pipelines in sequence
     from .graph import run_pipeline
-    post_path = run_pipeline()
-    if post_path:
-        print(f"Newsletter written to: {post_path}")
-    else:
-        print("Pipeline completed but no post was written.")
-        sys.exit(1)
+    run_pipeline()
 
 
 if __name__ == "__main__":

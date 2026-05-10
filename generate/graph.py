@@ -1,12 +1,19 @@
 """
-LangGraph pipeline for the AI newsletter generator.
+Two independent LangGraph pipelines:
 
-Linear pipeline (no conditional edges needed — fetch always proceeds):
+  RESEARCH PIPELINE  (run any time — fetches, analyzes, saves to Qdrant)
+    fetch → analyze → ingest → END
 
-  fetch → analyze → select → write → publish → END
+  NEWSLETTER PIPELINE  (run once daily — reads from Qdrant, publishes)
+    qdrant_fetch → select → write → publish → END
 
-Each node receives the full NewsletterState TypedDict and returns only the
-keys it modified. LangGraph merges updates automatically.
+Run together:   python -m generate
+Research only:  python -m generate --research
+Newsletter only: python -m generate --newsletter
+
+The research pipeline can run multiple times a day — content lands in Qdrant
+immediately and is searchable. The newsletter pipeline pulls whatever is in
+Qdrant (filtered to LOOKBACK_DAYS), so it benefits from every research run.
 """
 
 import time
@@ -17,29 +24,32 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from .analyzer import analyze_all
-from .config import LOOKBACK_DAYS, TOP_N_ARTICLES
+from .config import LOOKBACK_DAYS, QDRANT_COLLECTION, TOP_N_ARTICLES
 from .curator import refresh_sources, should_refresh
 from .git_ops import git_commit_and_push
+from .ingestor import collection_count, ingest_articles, setup_collection
 from .llm import warmup_ollama
 from .schemas import AnalyzedItem, ArticleItem
 from .sources import fetch_all, load_sources
-from .state import (
-    already_published,
-    get_issue_number,
-    load_state,
-    mark_published,
-    save_state,
-)
+from .state import already_published, get_issue_number, load_state, mark_published, save_state
 from .writer import write_newsletter_post
 
 
-# ── Graph state ───────────────────────────────────────────────────────────────
+# ── State definitions ─────────────────────────────────────────────────────────
+
+class ResearchState(TypedDict):
+    app_state: dict
+    raw_articles: list[dict]        # ArticleItem dicts from sources
+    analyzed_articles: list[dict]   # AnalyzedItem dicts after Ollama
+    ingested_count: int             # how many new articles landed in Qdrant
+    date_str: str
+    errors: list[str]
+
 
 class NewsletterState(TypedDict):
-    app_state: dict                   # loaded newsletter_state.json
-    raw_articles: list[dict]          # ArticleItem dicts
-    analyzed_articles: list[dict]     # AnalyzedItem dicts
-    selected_articles: list[dict]     # top N AnalyzedItem dicts
+    app_state: dict
+    analyzed_articles: list[dict]   # pulled from Qdrant (already analyzed)
+    selected_articles: list[dict]   # after select/editor node
     newsletter_content: str
     post_path: Path | None
     issue_number: int
@@ -47,19 +57,17 @@ class NewsletterState(TypedDict):
     errors: list[str]
 
 
-# ── Node: fetch ────────────────────────────────────────────────────────────────
+# ── Research nodes ────────────────────────────────────────────────────────────
 
-def fetch_node(state: NewsletterState) -> dict:
+def fetch_node(state: ResearchState) -> dict:
     """
-    1. Run source curation if overdue (Claude CLI, weekly).
-    2. Fetch all articles from active sources since LOOKBACK_DAYS ago.
-    3. Filter out already-published URLs.
+    Curate sources if overdue, then fetch all articles since LOOKBACK_DAYS.
+    No already-published filter here — the ingestor handles dedup via upsert.
     """
     t0 = time.perf_counter()
     app_state = state["app_state"]
     errors: list[str] = list(state.get("errors", []))
 
-    # Weekly source curation
     if should_refresh(app_state):
         try:
             refresh_sources(app_state)
@@ -68,7 +76,6 @@ def fetch_node(state: NewsletterState) -> dict:
             print(f"  ! {msg}")
             errors.append(msg)
 
-    # Determine lookback window
     since = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     print(f"  [fetch] Fetching articles since {since.date()}...")
 
@@ -80,20 +87,12 @@ def fetch_node(state: NewsletterState) -> dict:
         errors.append(msg)
         articles = []
 
-    # Filter already-published URLs
-    fresh = [a for a in articles if not already_published(app_state, a.url)]
-    print(f"  [fetch] {len(fresh)} new articles (filtered {len(articles) - len(fresh)} already-published) | {time.perf_counter() - t0:.1f}s")
-
-    return {
-        "raw_articles": [a.model_dump() for a in fresh],
-        "errors": errors,
-    }
+    print(f"  [fetch] {len(articles)} articles | {time.perf_counter() - t0:.1f}s")
+    return {"raw_articles": [a.model_dump() for a in articles], "errors": errors}
 
 
-# ── Node: analyze ──────────────────────────────────────────────────────────────
-
-def analyze_node(state: NewsletterState) -> dict:
-    """Analyze all raw articles with Ollama structured output."""
+def analyze_node(state: ResearchState) -> dict:
+    """Analyze raw articles with Ollama structured output."""
     t0 = time.perf_counter()
     raw = state.get("raw_articles", [])
     if not raw:
@@ -103,43 +102,111 @@ def analyze_node(state: NewsletterState) -> dict:
     articles = [ArticleItem(**d) for d in raw]
     print(f"  [analyze] Analyzing {len(articles)} articles...")
     analyzed = analyze_all(articles)
-    print(f"  [analyze] Done: {len(analyzed)} analyzed | {time.perf_counter() - t0:.1f}s")
+    print(f"  [analyze] {len(analyzed)} done | {time.perf_counter() - t0:.1f}s")
     return {"analyzed_articles": [a.model_dump() for a in analyzed]}
 
 
-# ── Node: select ───────────────────────────────────────────────────────────────
-
-def select_node(state: NewsletterState) -> dict:
+def ingest_node(state: ResearchState) -> dict:
     """
-    Sort by (is_major desc, relevance desc) and pick TOP_N_ARTICLES.
-    Filters out items with relevance < 4.
+    Embed analyzed articles and upsert to Qdrant.
+    Upsert is idempotent — running twice on the same URL is safe.
+    Content is immediately searchable after this node.
     """
     t0 = time.perf_counter()
     analyzed = [AnalyzedItem(**d) for d in state.get("analyzed_articles", [])]
+    if not analyzed:
+        print("  [ingest] Nothing to ingest.")
+        return {"ingested_count": 0}
 
-    # Join source tier from sources.json for tie-breaking
+    setup_collection()
+    count = ingest_articles(analyzed)
+    total = collection_count()
+
+    app_state = state["app_state"]
+    app_state["last_research_run"] = datetime.now(timezone.utc).isoformat()
+    save_state(app_state)
+
+    print(f"  [ingest] {count} new · {total} total in Qdrant | {time.perf_counter() - t0:.1f}s")
+    return {"ingested_count": count, "app_state": app_state}
+
+
+# ── Newsletter nodes ──────────────────────────────────────────────────────────
+
+def qdrant_fetch_node(state: NewsletterState) -> dict:
+    """
+    Pull today's analyzed articles from Qdrant instead of re-fetching live sources.
+    Filters out URLs already published in a previous newsletter issue.
+    """
+    t0 = time.perf_counter()
+    app_state = state["app_state"]
+    errors: list[str] = list(state.get("errors", []))
+
+    try:
+        from qdrant_client.models import FieldCondition, Filter, Range
+        from .ingestor import _client
+
+        cutoff = int(
+            (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).timestamp()
+        )
+
+        results, _ = _client().scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="published_timestamp", range=Range(gte=cutoff))]
+            ),
+            limit=500,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        articles = []
+        for point in results:
+            p = point.payload
+            if not already_published(app_state, p["url"]):
+                articles.append({
+                    "title":       p["title"],
+                    "url":         p["url"],
+                    "source_name": p["source_name"],
+                    "source_type": p["source_type"],
+                    "published":   p["published"],
+                    "author":      p.get("author", ""),
+                    "summary":     p["summary"],
+                    "relevance":   p["relevance"],
+                    "tags":        p["tags"],
+                    "is_major":    p["is_major"],
+                })
+
+        print(f"  [qdrant_fetch] {len(articles)} articles from last {LOOKBACK_DAYS}d | {time.perf_counter() - t0:.1f}s")
+        return {"analyzed_articles": articles, "errors": errors}
+
+    except Exception as e:
+        msg = f"qdrant_fetch failed: {e}"
+        print(f"  [qdrant_fetch] ! {msg}")
+        errors.append(msg)
+        return {"analyzed_articles": [], "errors": errors}
+
+
+def select_node(state: NewsletterState) -> dict:
+    """Sort by (is_major desc, relevance desc, tier asc) and pick TOP_N_ARTICLES."""
+    t0 = time.perf_counter()
+    analyzed = [AnalyzedItem(**d) for d in state.get("analyzed_articles", [])]
+
     sources = load_sources()
     tier_map = {s.name: s.tier for s in sources}
 
-    # Filter low-relevance
     worthy = [a for a in analyzed if a.relevance >= 4]
-    print(f"  [select] {len(worthy)}/{len(analyzed)} articles pass relevance filter (>=4)")
+    print(f"  [select] {len(worthy)}/{len(analyzed)} pass relevance filter (>=4)")
 
-    # Sort: major first, then by relevance desc, then tier asc (lower=better)
-    worthy.sort(
-        key=lambda a: (
-            0 if a.is_major else 1,
-            -a.relevance,
-            tier_map.get(a.source_name, 99),
-        )
-    )
+    worthy.sort(key=lambda a: (
+        0 if a.is_major else 1,
+        -a.relevance,
+        tier_map.get(a.source_name, 99),
+    ))
 
     selected = worthy[:TOP_N_ARTICLES]
-    print(f"  [select] Selected {len(selected)} articles | {time.perf_counter() - t0:.1f}s")
+    print(f"  [select] {len(selected)} selected | {time.perf_counter() - t0:.1f}s")
     return {"selected_articles": [a.model_dump() for a in selected]}
 
-
-# ── Node: write ────────────────────────────────────────────────────────────────
 
 def write_node(state: NewsletterState) -> dict:
     """Write the Jekyll newsletter post using Ollama for the intro paragraph."""
@@ -158,12 +225,8 @@ def write_node(state: NewsletterState) -> dict:
     print(f"  [write] Writing issue #{issue_number} with {len(selected)} articles...")
     try:
         content, post_path = write_newsletter_post(selected, issue_number, date_str)
-        print(f"  [write] Done: {post_path.name} | {time.perf_counter() - t0:.1f}s")
-        return {
-            "newsletter_content": content,
-            "post_path": post_path,
-            "errors": errors,
-        }
+        print(f"  [write] {post_path.name} | {time.perf_counter() - t0:.1f}s")
+        return {"newsletter_content": content, "post_path": post_path, "errors": errors}
     except Exception as e:
         msg = f"write_newsletter_post failed: {e}"
         print(f"  [write] ! {msg}")
@@ -171,10 +234,8 @@ def write_node(state: NewsletterState) -> dict:
         return {"post_path": None, "newsletter_content": "", "errors": errors}
 
 
-# ── Node: publish ──────────────────────────────────────────────────────────────
-
 def publish_node(state: NewsletterState) -> dict:
-    """Commit + push the post, then update state."""
+    """Git commit + push, mark URLs published, save state."""
     t0 = time.perf_counter()
     post_path = state.get("post_path")
     app_state = state["app_state"]
@@ -183,7 +244,7 @@ def publish_node(state: NewsletterState) -> dict:
     errors: list[str] = list(state.get("errors", []))
 
     if post_path is None:
-        print("  [publish] No post to publish — skipping git push")
+        print("  [publish] No post — skipping git push")
     else:
         try:
             git_commit_and_push(post_path, issue_number)
@@ -192,17 +253,6 @@ def publish_node(state: NewsletterState) -> dict:
             print(f"  [publish] ! {msg}")
             errors.append(msg)
 
-    # Ingest into Qdrant
-    try:
-        from .ingestor import ingest_articles, collection_count
-        ingested = ingest_articles(selected)
-        total = collection_count()
-        print(f"  [qdrant] {ingested} new articles | {total} total in DB")
-    except Exception as e:
-        msg = f"Qdrant ingest failed: {e}"
-        print(f"  [publish] ! {msg}")
-        errors.append(msg)
-
     mark_published(app_state, selected)
     app_state["last_run"] = datetime.now(timezone.utc).isoformat()
     save_state(app_state)
@@ -210,69 +260,106 @@ def publish_node(state: NewsletterState) -> dict:
     return {"app_state": app_state, "errors": errors}
 
 
-# ── Build graph ───────────────────────────────────────────────────────────────
+# ── Build research graph ──────────────────────────────────────────────────────
 
-_builder = StateGraph(NewsletterState)
-_builder.add_node("fetch", fetch_node)
-_builder.add_node("analyze", analyze_node)
-_builder.add_node("select", select_node)
-_builder.add_node("write", write_node)
-_builder.add_node("publish", publish_node)
-
-_builder.set_entry_point("fetch")
-_builder.add_edge("fetch", "analyze")
-_builder.add_edge("analyze", "select")
-_builder.add_edge("select", "write")
-_builder.add_edge("write", "publish")
-_builder.add_edge("publish", END)
-
-pipeline = _builder.compile()
+_research_builder = StateGraph(ResearchState)
+_research_builder.add_node("fetch",   fetch_node)
+_research_builder.add_node("analyze", analyze_node)
+_research_builder.add_node("ingest",  ingest_node)
+_research_builder.set_entry_point("fetch")
+_research_builder.add_edge("fetch",   "analyze")
+_research_builder.add_edge("analyze", "ingest")
+_research_builder.add_edge("ingest",  END)
+research_pipeline = _research_builder.compile()
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
+# ── Build newsletter graph ────────────────────────────────────────────────────
 
-def run_pipeline() -> Path | None:
-    """
-    Run the full newsletter pipeline.
-    Returns the post Path on success, None if no post was written.
-    """
-    t0 = time.perf_counter()
-    print(f"\n{'=' * 60}")
-    print(f"  AI Newsletter Generator — Starting pipeline")
-    print(f"{'=' * 60}")
+_newsletter_builder = StateGraph(NewsletterState)
+_newsletter_builder.add_node("qdrant_fetch", qdrant_fetch_node)
+_newsletter_builder.add_node("select",       select_node)
+_newsletter_builder.add_node("write",        write_node)
+_newsletter_builder.add_node("publish",      publish_node)
+_newsletter_builder.set_entry_point("qdrant_fetch")
+_newsletter_builder.add_edge("qdrant_fetch", "select")
+_newsletter_builder.add_edge("select",       "write")
+_newsletter_builder.add_edge("write",        "publish")
+_newsletter_builder.add_edge("publish",      END)
+newsletter_pipeline = _newsletter_builder.compile()
 
+
+# ── Public entry points ───────────────────────────────────────────────────────
+
+def _banner(title: str):
+    print(f"\n{'=' * 60}\n  {title}\n{'=' * 60}")
+
+
+def run_research() -> int:
+    """Fetch + analyze + ingest to Qdrant. Returns count of new articles."""
+    _banner("Research Pipeline — fetch → analyze → ingest")
     warmup_ollama()
+    app_state = load_state()
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    initial: ResearchState = {
+        "app_state":        app_state,
+        "raw_articles":     [],
+        "analyzed_articles": [],
+        "ingested_count":   0,
+        "date_str":         date_str,
+        "errors":           [],
+    }
+
+    t0 = time.perf_counter()
+    final = research_pipeline.invoke(initial)
+    count = final.get("ingested_count", 0)
+    errors = final.get("errors", [])
+
+    print(f"\n{'=' * 60}")
+    print(f"  Research done in {time.perf_counter() - t0:.1f}s — {count} new articles in Qdrant")
+    if errors:
+        for err in errors:
+            print(f"    ! {err}")
+    print(f"{'=' * 60}\n")
+    return count
+
+
+def run_newsletter() -> Path | None:
+    """Read from Qdrant + select + write + publish. Returns post Path or None."""
+    _banner("Newsletter Pipeline — qdrant_fetch → select → write → publish")
     app_state = load_state()
     issue_number = get_issue_number(app_state)
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     initial: NewsletterState = {
-        "app_state": app_state,
-        "raw_articles": [],
-        "analyzed_articles": [],
-        "selected_articles": [],
+        "app_state":          app_state,
+        "analyzed_articles":  [],
+        "selected_articles":  [],
         "newsletter_content": "",
-        "post_path": None,
-        "issue_number": issue_number,
-        "date_str": date_str,
-        "errors": [],
+        "post_path":          None,
+        "issue_number":       issue_number,
+        "date_str":           date_str,
+        "errors":             [],
     }
 
-    final = pipeline.invoke(initial)
-
-    elapsed = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    final = newsletter_pipeline.invoke(initial)
     post_path = final.get("post_path")
     errors = final.get("errors", [])
 
     print(f"\n{'=' * 60}")
     if post_path:
-        print(f"  Done in {elapsed:.1f}s — Issue #{issue_number}: {post_path.name}")
+        print(f"  Issue #{issue_number} done in {time.perf_counter() - t0:.1f}s — {post_path.name}")
     else:
-        print(f"  Done in {elapsed:.1f}s — No post written (check errors above)")
+        print(f"  Done in {time.perf_counter() - t0:.1f}s — No post written")
     if errors:
-        print(f"  Errors ({len(errors)}):")
         for err in errors:
-            print(f"    - {err}")
+            print(f"    ! {err}")
     print(f"{'=' * 60}\n")
-
     return post_path
+
+
+def run_pipeline() -> Path | None:
+    """Run both pipelines in sequence: research then newsletter."""
+    run_research()
+    return run_newsletter()
