@@ -192,7 +192,17 @@ def publish_node(state: NewsletterState) -> dict:
             print(f"  [publish] ! {msg}")
             errors.append(msg)
 
-    # Update state regardless of push success
+    # Ingest into Qdrant
+    try:
+        from .ingestor import ingest_articles, collection_count
+        ingested = ingest_articles(selected)
+        total = collection_count()
+        print(f"  [qdrant] {ingested} new articles | {total} total in DB")
+    except Exception as e:
+        msg = f"Qdrant ingest failed: {e}"
+        print(f"  [publish] ! {msg}")
+        errors.append(msg)
+
     mark_published(app_state, selected)
     app_state["last_run"] = datetime.now(timezone.utc).isoformat()
     save_state(app_state)

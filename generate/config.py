@@ -24,6 +24,12 @@ PUSH_BRANCH = os.environ.get("PUSH_BRANCH", "main" if APP_ENV == "prod" else "de
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 X_BEARER_TOKEN = os.environ.get("X_BEARER_TOKEN", "")
 
+QDRANT_URL = os.environ.get("QDRANT_URL", "")
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
+QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "ai_articles")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+EMBED_DIM = 768
+
 MAX_ARTICLES_PER_SOURCE = int(os.environ.get("MAX_ARTICLES_PER_SOURCE", "5"))
 MAX_ARXIV_RESULTS = int(os.environ.get("MAX_ARXIV_RESULTS", "15"))
 MAX_TWEETS_PER_HANDLE = int(os.environ.get("MAX_TWEETS_PER_HANDLE", "5"))
