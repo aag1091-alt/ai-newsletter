@@ -25,7 +25,6 @@ from .config import (
     PERPLEXICA_URL,
     RESEARCH_MAX_ARTICLES,
     RESEARCH_THRESHOLD,
-    TAVILY_API_KEY,
 )
 from .schemas import AnalyzedItem
 
@@ -35,16 +34,6 @@ _ollama = _ollama_lib.Client(host=OLLAMA_HOST)
 
 
 # ── Search backends ───────────────────────────────────────────────────────────
-
-def _search_tavily(query: str, max_results: int = 5) -> list[dict]:
-    from tavily import TavilyClient
-    client = TavilyClient(api_key=TAVILY_API_KEY)
-    resp = client.search(query, max_results=max_results, search_depth="advanced")
-    return [
-        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")[:400]}
-        for r in resp.get("results", [])
-    ]
-
 
 def _search_perplexica(query: str, max_results: int = 5) -> list[dict]:
     import httpx
@@ -77,13 +66,7 @@ def _search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
 
 
 def web_search(query: str, max_results: int = 5) -> list[dict]:
-    """Try Tavily → Perplexica → DuckDuckGo, return first successful result."""
-    if TAVILY_API_KEY:
-        try:
-            return _search_tavily(query, max_results)
-        except Exception as e:
-            print(f"  [research] Tavily failed ({e}), trying next backend...")
-
+    """Try Perplexica → DuckDuckGo, return first successful result."""
     if PERPLEXICA_URL:
         try:
             return _search_perplexica(query, max_results)

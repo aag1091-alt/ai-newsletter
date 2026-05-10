@@ -33,7 +33,6 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 EMBED_DIM = 768
 
 # Research agent
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 PERPLEXICA_URL = os.environ.get("PERPLEXICA_URL", "")   # e.g. http://100.118.247.106:3000
 RESEARCH_ENABLED = os.environ.get("RESEARCH_ENABLED", "true").lower() == "true"
 RESEARCH_THRESHOLD = int(os.environ.get("RESEARCH_THRESHOLD", "7"))  # min relevance for deep research
