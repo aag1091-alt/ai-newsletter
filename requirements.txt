@@ -1,0 +1,10 @@
+anthropic
+ollama
+langgraph
+pydantic>=2.0
+feedparser
+tweepy
+httpx
+beautifulsoup4
+lxml
+schedule

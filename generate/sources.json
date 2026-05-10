@@ -1,0 +1,22 @@
+[
+  {"type": "rss", "name": "Anthropic Blog", "url": "https://www.anthropic.com/rss.xml", "tier": 1, "active": true},
+  {"type": "rss", "name": "OpenAI Blog", "url": "https://openai.com/blog/rss.xml", "tier": 1, "active": true},
+  {"type": "rss", "name": "Google DeepMind Blog", "url": "https://deepmind.google/blog/rss.xml", "tier": 1, "active": true},
+  {"type": "rss", "name": "Meta AI Blog", "url": "https://ai.meta.com/blog/rss/", "tier": 1, "active": true},
+  {"type": "rss", "name": "Hugging Face Blog", "url": "https://huggingface.co/blog/feed.xml", "tier": 2, "active": true},
+  {"type": "rss", "name": "The Batch (DeepLearning.AI)", "url": "https://www.deeplearning.ai/the-batch/feed/", "tier": 2, "active": true},
+  {"type": "rss", "name": "Import AI", "url": "https://importai.substack.com/feed", "tier": 2, "active": true},
+  {"type": "rss", "name": "Mistral AI Blog", "url": "https://mistral.ai/news/rss.xml", "tier": 1, "active": true},
+  {"type": "rss", "name": "xAI Blog", "url": "https://x.ai/blog/rss.xml", "tier": 1, "active": true},
+  {"type": "rss", "name": "Papers With Code", "url": "https://paperswithcode.com/rss", "tier": 2, "active": true},
+  {"type": "arxiv", "name": "arXiv cs.AI", "query": "cat:cs.AI", "tier": 1, "active": true},
+  {"type": "arxiv", "name": "arXiv cs.LG", "query": "cat:cs.LG", "tier": 1, "active": true},
+  {"type": "arxiv", "name": "arXiv cs.CL", "query": "cat:cs.CL", "tier": 1, "active": true},
+  {"type": "twitter", "name": "Anthropic", "handle": "AnthropicAI", "tier": 1, "active": true},
+  {"type": "twitter", "name": "OpenAI", "handle": "OpenAI", "tier": 1, "active": true},
+  {"type": "twitter", "name": "Yann LeCun", "handle": "ylecun", "tier": 1, "active": true},
+  {"type": "twitter", "name": "Andrej Karpathy", "handle": "karpathy", "tier": 1, "active": true},
+  {"type": "twitter", "name": "Demis Hassabis", "handle": "demishassabis", "tier": 1, "active": true},
+  {"type": "twitter", "name": "Sam Altman", "handle": "sama", "tier": 2, "active": true},
+  {"type": "twitter", "name": "DeepMind", "handle": "GoogleDeepMind", "tier": 1, "active": true}
+]
