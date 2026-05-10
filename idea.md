@@ -10,27 +10,42 @@ The source list itself is maintained by Claude, which reviews it weekly and adds
 
 ## How It Works
 
+Two independent pipelines — run separately or together.
+
 ```
-sources.json  ←──── Claude (weekly curation)
-     │
-     ▼
- fetch_node       Pull from RSS, arXiv API, Twitter/X API, blogs
-     │
-     ▼
- analyze_node     Ollama: summarize + relevance score + tags (per article, parallel)
-     │
-     ▼
- editor_node      Autonomous editor agent — picks articles, writes reasoning + TL;DR
-     │               per article, drafts editorial note on the issue's theme
-     ▼
- write_node       Assemble Jekyll post with editor commentary baked in
-     │
-     ▼
- publish_node     Git commit + push → GitHub Pages + ingest to Qdrant
-     │
-     ▼
- Qdrant Cloud     Growing knowledge base — semantic search + RAG chatbot on top
+── RESEARCH PIPELINE ──────────────────────────────────────────
+  (runs every 6h — content lands in Qdrant immediately)
+
+  sources.json ←── Claude (weekly curation)
+       │
+       ▼
+  fetch_node       RSS / arXiv API / Twitter X API / blogs
+       │
+       ▼
+  analyze_node     Ollama: summarize + relevance score + tags (parallel, 4 workers)
+       │
+       ▼
+  ingest_node ───► Qdrant Cloud  (upsert, idempotent by URL)
+                       └── searchable immediately after ingest
+
+── NEWSLETTER PIPELINE ────────────────────────────────────────
+  (runs once daily at 07:00 — reads from Qdrant, never re-fetches)
+
+  qdrant_fetch_node   Pull today's articles from Qdrant (already analyzed)
+       │
+       ▼
+  editor_node         Autonomous editor — selects, writes reasoning + TL;DR
+       │               per article, drafts editorial note on the issue's theme
+       ▼
+  write_node          Assemble Jekyll post with editor commentary
+       │
+       ▼
+  publish_node        Git push → GitHub Pages auto-builds
 ```
+
+**Why two pipelines:** Content is searchable the moment it's fetched. The newsletter
+builder pulls from Qdrant, so it benefits from every research run — not just today's.
+Each layer can be run and debugged independently.
 
 ## Design Choices
 
