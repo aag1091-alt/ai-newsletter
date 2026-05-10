@@ -110,11 +110,32 @@ portable to open-source models — this will matter beyond Anthropic.
 
 **New files needed:** `generate/editor.py`, updated `schemas.py` (`EditorDecision`, `ArticleVerdict`), updated `graph.py` and `writer.py`.
 
-## Deep Research Layer *(planned)*
+## Deep Research Layer *(built)*
 
-Add **Perplexica** (open source Perplexity alternative) running in Docker on the Minisforum, connected to the existing Ollama setup. Has an Academic focus mode for arXiv + Semantic Scholar. Paired with **SearXNG** (self-hosted, no API key) or **Tavily** (1000 free searches/month) as the search backend.
+Articles scoring >= `RESEARCH_THRESHOLD` (default 7/10) or flagged `is_major` get automatic deep research before being stored in Qdrant.
 
-The pipeline can call this when it wants to go deeper on a topic — e.g., if a paper gets a high relevance score, the editor agent can request a deeper search before deciding whether to include it.
+**Research pipeline:** `fetch → analyze → deep_research → ingest`
+
+**Search backend priority:**
+1. **Tavily** — best quality, built for AI agents, free tier 1000 searches/month (`TAVILY_API_KEY`)
+2. **Perplexica** — self-hosted on Minisforum in Docker, Academic mode searches arXiv + Semantic Scholar (`PERPLEXICA_URL=http://100.118.247.106:3000`)
+3. **DuckDuckGo** — always-on fallback, no key needed
+
+**What the research agent does per article:**
+1. Ollama generates 2 focused search queries (related papers + reactions/implications)
+2. Both queries run in parallel, results deduplicated by URL
+3. Ollama synthesizes findings into a 120-150 word `research_notes` paragraph
+4. `research_notes` + `research_sources` stored in Qdrant alongside the article
+
+**Perplexica setup on Minisforum** (Docker, optional but recommended for academic depth):
+```bash
+git clone https://github.com/ItzCrazyKns/Perplexica.git
+cd Perplexica
+cp sample.config.toml config.toml
+# Set OLLAMA_API_URL=http://host.docker.internal:11434 in config.toml
+docker compose up -d
+# Then set PERPLEXICA_URL=http://100.118.247.106:3000 in .env
+```
 
 ## Knowledge Base & Chatbot
 
