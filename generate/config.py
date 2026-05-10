@@ -8,7 +8,9 @@ if _env.exists():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                v = v.strip().strip('"').strip("'")
+                v = v.split("  #")[0].strip()  # strip inline comments
+                os.environ.setdefault(k.strip(), v)
 
 SCRIPT_DIR = Path(__file__).parent.parent
 NEWSLETTER_BLOG_DIR = Path(os.environ.get("NEWSLETTER_BLOG_DIR", str(SCRIPT_DIR / "newsletter-blog")))
