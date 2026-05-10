@@ -9,3 +9,5 @@ beautifulsoup4
 lxml
 schedule
 qdrant-client
+duckduckgo-search
+tavily-python

@@ -106,6 +106,46 @@ def analyze_node(state: ResearchState) -> dict:
     return {"analyzed_articles": [a.model_dump() for a in analyzed]}
 
 
+def deep_research_node(state: ResearchState) -> dict:
+    """
+    For articles above RESEARCH_THRESHOLD (or is_major), run web search + Ollama synthesis.
+    Adds research_notes and research_sources to the article dicts before Qdrant ingest.
+    Skipped entirely if RESEARCH_ENABLED=false.
+    """
+    from .config import RESEARCH_ENABLED, RESEARCH_MAX_ARTICLES, RESEARCH_THRESHOLD
+
+    if not RESEARCH_ENABLED:
+        print("  [deep_research] Disabled (RESEARCH_ENABLED=false) — skipping")
+        return {}
+
+    t0 = time.perf_counter()
+    analyzed = state.get("analyzed_articles", [])
+
+    targets = [
+        d for d in analyzed
+        if d.get("relevance", 0) >= RESEARCH_THRESHOLD or d.get("is_major", False)
+    ][:RESEARCH_MAX_ARTICLES]
+
+    if not targets:
+        print(f"  [deep_research] No articles above threshold ({RESEARCH_THRESHOLD}) — skipping")
+        return {}
+
+    print(f"  [deep_research] Researching {len(targets)} high-relevance articles...")
+
+    from .researcher import research_all
+    items = [AnalyzedItem(**d) for d in targets]
+    research_map = research_all(items)
+
+    # Merge research results back into article dicts
+    articles_by_url = {d["url"]: d for d in analyzed}
+    for url, notes in research_map.items():
+        if url in articles_by_url and notes:
+            articles_by_url[url].update(notes)
+
+    print(f"  [deep_research] Done | {time.perf_counter() - t0:.1f}s")
+    return {"analyzed_articles": list(articles_by_url.values())}
+
+
 def ingest_node(state: ResearchState) -> dict:
     """
     Embed analyzed articles and upsert to Qdrant.
@@ -263,13 +303,15 @@ def publish_node(state: NewsletterState) -> dict:
 # ── Build research graph ──────────────────────────────────────────────────────
 
 _research_builder = StateGraph(ResearchState)
-_research_builder.add_node("fetch",   fetch_node)
-_research_builder.add_node("analyze", analyze_node)
-_research_builder.add_node("ingest",  ingest_node)
+_research_builder.add_node("fetch",          fetch_node)
+_research_builder.add_node("analyze",        analyze_node)
+_research_builder.add_node("deep_research",  deep_research_node)
+_research_builder.add_node("ingest",         ingest_node)
 _research_builder.set_entry_point("fetch")
-_research_builder.add_edge("fetch",   "analyze")
-_research_builder.add_edge("analyze", "ingest")
-_research_builder.add_edge("ingest",  END)
+_research_builder.add_edge("fetch",         "analyze")
+_research_builder.add_edge("analyze",       "deep_research")
+_research_builder.add_edge("deep_research", "ingest")
+_research_builder.add_edge("ingest",        END)
 research_pipeline = _research_builder.compile()
 
 

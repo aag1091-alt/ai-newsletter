@@ -103,6 +103,8 @@ def _item_to_point(item: AnalyzedItem) -> PointStruct:
             "summary":             item.summary,
             "relevance":           item.relevance,
             "is_major":            item.is_major,
+            "research_notes":      item.research_notes,
+            "research_sources":    item.research_sources,
         },
     )
 

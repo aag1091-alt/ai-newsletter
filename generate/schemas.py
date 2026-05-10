@@ -53,6 +53,9 @@ class AnalyzedItem(BaseModel):
     relevance: int         # 0-10
     tags: list[str]        # ["LLMs", "safety", ...]
     is_major: bool         # major announcement vs incremental
+    # Research agent fields — populated by deep_research_node
+    research_notes: str = ""                              # Ollama synthesis of web research
+    research_sources: list[dict] = Field(default_factory=list)  # extra sources found
 
 
 class CurationResult(BaseModel):
